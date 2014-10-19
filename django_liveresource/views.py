@@ -1,10 +1,104 @@
+from copy import deepcopy
 import json
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseNotAllowed
 from django_grip import websocket_only
+from django_liveresource import internal_request, canonical_uri, parse_header_params, is_response_empty, channel_for_uri
+
+class WsRequestError(Exception):
+	def __init__(self, condition, message=''):
+		super(WsRequestError, self).__init__(message)
+		self.condition = condition
+
+def _handle_ws_request(ws, req):
+	rtype = req.get('type')
+	if rtype is None or not isinstance(rtype, basestring) or rtype not in ('subscribe', 'unsubscribe', 'ping'):
+		raise WsRequestError('unknown-type')
+
+	if rtype == 'ping':
+		return {'type': 'pong'}
+
+	# if we are here, then the type is subscribe or unsubscribe
+	assert(rtype == 'subscribe' or rtype == 'unsubscribe')
+
+	uri = req.get('uri')
+	if uri is None or not isinstance(uri, basestring):
+		raise WsRequestError('bad-request')
+
+	try:
+		uri = canonical_uri(uri)
+	except:
+		raise WsRequestError('bad-request')
+
+	mode = req.get('mode')
+	if mode is None or not isinstance(mode, basestring) or mode not in ('value', 'changes'):
+		raise WsRequestError('bad-request')
+
+	if rtype == 'subscribe':
+		ws.subscribe(channel_for_uri(uri, mode))
+		return {'type': 'subscribed'}
+	else: # unsubscribe
+		ws.unsubscribe(channel_for_uri(uri, mode))
+		return {'type': 'unsubscribed'}
 
 def multi(request):
-	# TODO: make internal requests and respond normally. middleware will handle grip stuff.
-	#  set resp.multi_uris to a list of uris being serviced by this request
-	pass
+	if request.method != 'GET':
+		return HttpResponseNotAllowed(['GET'])
+
+	# prevent loops
+	if request.META.get('HTTP_INTERNAL') == '1':
+		return HttpResponseBadRequest('Can\'t make internal requests to the multi resource.\n')
+
+	# headers to pass along
+	headers_meta = dict()
+	for k, v in request.META.iteritems():
+		if k not in ('HTTP_INTERNAL', 'HTTP_WAIT'):
+			headers_meta[k] = v
+
+	uri_headers = dict()
+	for i in request.META.get('HTTP_URI').split(','):
+		try:
+			uri, params = parse_header_params(i)
+		except:
+			return HttpResponseBadRequest('Failed to parse Uri header.\n')
+
+		try:
+			uri = canonical_uri(uri)
+		except:
+			return HttpResponseBadRequest('Invalid Uri value.\n')
+
+		uri_headers[uri] = params
+
+	results = dict()
+	for uri, params in uri_headers.iteritems():
+		meta = deepcopy(headers_meta)
+		for k, v in params.iteritems():
+			meta['HTTP_' + k.upper()] = v
+
+		resp = internal_request(uri, meta)
+		if is_response_empty(resp):
+			continue
+
+		resp_headers = dict()
+		for k, v in resp.items():
+			resp_headers[k] = v
+
+		try:
+			resp_body = json.loads(resp.content)
+		except:
+			return HttpResponseBadRequest('One or more resources produces non-JSON content.\n')
+
+		result = dict()
+		result['code'] = resp.status_code
+		result['headers'] = resp_headers
+		result['body'] = resp_body
+
+		results[uri] = result
+
+	resp = HttpResponse(json.dumps(results), content_type='application/json')
+
+	# to help out the middleware, provide the original uri list if the response would be empty
+	resp.multi_uris = uri_headers.keys() if len(results) == 0 else {}
+	return resp
 
 @websocket_only
 def updates(request):
@@ -20,16 +114,31 @@ def updates(request):
 			ws.close()
 			break
 
-		# FIXME: robust parsing
-		# FIXME: channel schema
-		req = json.loads(message)
-		if req['type'] == 'subscribe':
-			ws.subscribe(req['uri'])
-			resp = {'id': req['id'], 'type': 'subscribed'}
-		elif req['type'] == 'subscribe':
-			ws.unsubscribe(req['uri'])
-			resp = {'id': req['id'], 'type': 'unsubscribed'}
-		else:
-			resp = {'id': req['id'], 'type': 'error'}
+		# each incoming message must be a JSON object containing an id field,
+		#   otherwise we consider it bad protocol and close the connection
+
+		try:
+			req = json.loads(message)
+		except:
+			resp = {'type': 'error', 'condition': 'bad-protocol'}
+			ws.send(json.dumps(resp))
+			ws.close()
+			break
+
+		rid = req.get('id')
+		if rid is None or not isinstance(rid, basestring):
+			resp = {'type': 'error', 'condition': 'bad-protocol'}
+			ws.send(json.dumps(resp))
+			ws.close()
+			break
+
+		try:
+			resp = _handle_ws_request(ws, req)
+		except WsRequestError as e:
+			resp = {'type': 'error', 'condition': e.condition}
+		except:
+			resp = {'type': 'error', 'condition': 'internal-server-error'}
+
+		resp['id'] = rid
 
 		ws.send(json.dumps(resp))

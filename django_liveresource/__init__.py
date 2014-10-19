@@ -1,11 +1,45 @@
+from urlparse import urlparse
 import json
+import django.test.client
 from gripcontrol import Channel
 from django.http import HttpResponse, HttpResponseBadRequest
 from django_grip import set_hold_longpoll, publish
 
 # FIXME: prev_id on channels
 
-WAIT_MAX = 60 * 10
+WAIT_MAX = 60 * 5
+
+# TODO: @live decorator
+
+# GET request only. meta must contain headers using "HTTP_{header.upper}" format
+def internal_request(path, meta):
+	client = django.test.client.Client()
+	kwargs = dict()
+	for k, v in meta.iteritems():
+		if k.startswith('HTTP_'):
+			kwargs[k] = v
+	kwargs['HTTP_INTERNAL'] = '1'
+	return client.get(path, {}, **kwargs)
+
+def canonical_uri(uri):
+	result = urlparse(uri)
+	return result.path
+
+def parse_header_params(value):
+	parts = value.split(';')
+	first = parts.pop(0)
+	params = dict()
+	for part in parts:
+		k, v = part.lstrip().split('=', 1)
+		params[k] = v
+	return (first, params)
+
+def is_response_empty(response):
+	pass
+
+# modes: value, changes, value-multi, changes-multi
+def channel_for_uri(uri, mode):
+	pass
 
 # hijack requests and be able to make internal requests
 class LiveResourceMiddleware(object):
@@ -21,7 +55,6 @@ class LiveResourceMiddleware(object):
 			except:
 				return HttpResponseBadRequest('Invalid Wait header specified.\n')
 
-			del request.META['HTTP_WAIT']
 			if wait < 1:
 				wait = None
 			elif wait > WAIT_MAX:
@@ -34,8 +67,7 @@ class LiveResourceMiddleware(object):
 				return HttpResponse('Error: Realtime request not supported. Set up Pushpin or Fanout.\n', status=501)
 
 			if hasattr(resp, 'multi_uris'):
-				empty = True # TODO: check resp to make sure it is empty
-				if empty:
+				if resp.multi_empty:
 					# FIXME: channel schema
 					channels = list()
 					for uri in resp.multi_uris:
