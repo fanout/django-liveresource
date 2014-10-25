@@ -10,7 +10,7 @@ author='Justin Karneges',
 author_email='justin@fanout.io',
 url='https://github.com/fanout/django-liveresource',
 license='MIT',
-py_modules=['django_liveresource'],
+packages=['django_liveresource'],
 install_requires=['django-grip>=1.1.0'],
 classifiers=[
 	'Topic :: Utilities',

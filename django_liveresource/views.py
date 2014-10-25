@@ -2,7 +2,7 @@ from copy import deepcopy
 import json
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseNotAllowed
 from django_grip import websocket_only
-from django_liveresource import internal_request, canonical_uri, parse_header_params, is_response_empty, channel_for_uri
+from django_liveresource import internal_request, canonical_uri, parse_header_params, channel_for_uri, get_resourceinfo
 
 class WsRequestError(Exception):
 	def __init__(self, condition, message=''):
@@ -68,6 +68,7 @@ def multi(request):
 
 		uri_headers[uri] = params
 
+	info = list()
 	results = dict()
 	for uri, params in uri_headers.iteritems():
 		meta = deepcopy(headers_meta)
@@ -75,7 +76,10 @@ def multi(request):
 			meta['HTTP_' + k.upper()] = v
 
 		resp = internal_request(uri, meta)
-		if is_response_empty(resp):
+
+		ri = get_resourceinfo(resp, uri)
+		if ri and ri.empty:
+			info.append(ri)
 			continue
 
 		resp_headers = dict()
@@ -96,8 +100,8 @@ def multi(request):
 
 	resp = HttpResponse(json.dumps(results), content_type='application/json')
 
-	# to help out the middleware, provide the original uri list if the response would be empty
-	resp.multi_uris = uri_headers.keys() if len(results) == 0 else {}
+	# to help out the middleware, provide list of ResourceInfo if the response would be empty
+	resp.multi_info = info if len(results) == 0 else []
 	return resp
 
 @websocket_only
